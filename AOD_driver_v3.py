@@ -107,7 +107,7 @@ def vWriteStepEntry(hCard, dwStepIndex, dwStepNextIndex, dwSegmentIndex, dwLoops
     qwSequenceEntry <<= 32
     qwSequenceEntry |= ((dwStepNextIndex << 16) & SPCSEQ_NEXTSTEPMASK) | (int(dwSegmentIndex) & SPCSEQ_SEGMENTMASK)
 
-    dwError = spcm_dwSetParam_i64(hCard, SPC_SEQMODE_STEPMEM0 + dwStepIndex, int64(qwSequenceEntry))
+    dwError = spcm_dwSetParam_i64(hCard, SPC_SEQMODE_STEPMEM0 + dwStepIndex, int64(qwSequenceEntry))`
 
 
 def vConfigureSequence(hCard):
@@ -1690,7 +1690,7 @@ spcm_dwSetParam_i32 (hCard, SPCM_XX_ASYNCIO, 0) # Set output to 0
 spcm_dwSetParam_i32(hCard, SPC_CLOCKMODE, SPC_CM_EXTREFCLOCK)
 spcm_dwSetParam_i32(hCard, SPC_REFERENCECLOCK, 10000000)
 if ((lCardType.value & TYP_SERIESMASK) == TYP_M4IEXPSERIES) or ((lCardType.value & TYP_SERIESMASK) == TYP_M4XEXPSERIES):
-    spcm_dwSetParam_i64(hCard, SPC_SAMPLERATE, MEGA(860))
+    spcm_dwSetParam_i64(hCard, SPC_SAMPLERATE, MEGA(1250))
 else:
     spcm_dwSetParam_i64(hCard, SPC_SAMPLERATE, MEGA(1))
 spcm_dwSetParam_i32(hCard, SPC_CLOCKOUT, 0)
