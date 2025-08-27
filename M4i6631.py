@@ -13,6 +13,7 @@ import time
 import json
 import os
 import ctypes
+import logging
 
 from spcm_tools import *
 from pyspcm import *
@@ -21,6 +22,7 @@ from logger_config import get_logger, setup_logging
 
 setup_logging()
 logger = get_logger(__name__)
+logger.setLevel(logging.WARNING)
 
 class M4i6631:
     def __init__(self, address=b'/dev/spcm0', channelNum=2, sampleRate=500,
@@ -48,7 +50,7 @@ class M4i6631:
         self.f_res_desired = f_res_desired  # Desired frequency resolution
         self.f_res_set = None
         self.output_waveform_params = {}  # Dictionary with tone parameters
-        self.current_segment = 0 # Current memory segment in use - we will switch between segment 0 and 1
+        self.current_segment = 1 # Current memory segment in use - we will switch between segment 0 and 1
         # Buffers
         self.pvBuffer = None
         self.pnData = None
@@ -96,6 +98,7 @@ class M4i6631:
         self.set_sample_rate(self.sample_rate)
         self.set_clock_output(clockOut)
 
+        self.output_waveform_params = {}
         # Populate data buffer and AWG memory with default tone parameters
         if wf_params_default is None: # If not externally supplied
             wf_params_default = {
@@ -114,7 +117,8 @@ class M4i6631:
                     }
                 }
             }
-        self.generate_data(wf_params_default)
+        self.output_waveform_params = wf_params_default
+        self.generate_data(self.output_waveform_params)
         self.populate_awg_buffer()
         # self.card_turn_on()
 
@@ -155,15 +159,16 @@ class M4i6631:
         # Here I have to use a few facts. First, f_res = sample_rate//data_buffer_length. Then, data buffer
         # length itself is always defined as dwFactor*N, where N has to be an integer multiple of 32.
         # Of course, I have to round everything to the nearest integer number.
-        buffer_size_closest = int(self.sample_rate*1e06/self.f_res_desired * 1/self.dwFactor.value * 1/32)
-        self.sequence_data_len_samples = int(buffer_size_closest * self.dwFactor.value * 32) # PER CHANNEL
+        # buffer_size_closest = int(self.sample_rate*1e06/self.f_res_desired * 1/self.dwFactor.value * 1/32)
+        # self.sequence_data_len_samples = int(buffer_size_closest * self.dwFactor.value * 32) # PER CHANNEL
+        self.sequence_data_len_samples = int(32*round(self.sample_rate*1e06/self.f_res_desired/32))  # PER CHANNEL
         # Buffer length in bytes - 2* because data is in 16-bit format, which is 2 bytes per sample. TOTAL, NOT PER CHANNEL
         self.data_transfer_buffer_size_bytes = int(2 * self.sequence_data_len_samples * self.channel_number)
         # Resulting frequency resolution will not be exactly equal to the one we tried to set because of the rounding
         self.f_res_set = self.sample_rate*1e06//self.sequence_data_len_samples
 
-        logger.info(f"Frequency Resolution: requested {self.f_res_desired} Hz, set to {self.f_res_set} Hz")
-        logger.info(f"Buffer size: {buffer_size_closest} * 6 * 32")
+        logger.info("Frequency Resolution: requested {:8.4f} Hz, set to {:8.4f} Hz".format(self.f_res_desired, self.f_res_set))
+        # logger.info(f"Buffer size: {buffer_size_closest} * 6 * 32")
 
         # Allocate buffer for the generated waveforms
         self.pvBuffer = pvAllocMemPageAligned(self.data_transfer_buffer_size_bytes)
@@ -261,14 +266,10 @@ class M4i6631:
         if ((self.lCardType.value & TYP_SERIESMASK) == TYP_M4IEXPSERIES) or (
                 (self.lCardType.value & TYP_SERIESMASK) == TYP_M4XEXPSERIES):
             spcm_dwSetParam_i64(self.hCard, SPC_SAMPLERATE, self.SampleRate)
-            dwErrorReg = uint32(0)
-            lErrorValue = int32(0)
-            errText = ctypes.create_string_buffer(1000)
-            ptrErrText =  cast(addressof(errText), ptr16)
-            dwErrorCode = spcm_dwGetErrorInfo_i32(self.hCard, dwErrorReg, lErrorValue, ptrErrText)
+            dwErrorCode = self.handle_error()
             if dwErrorCode:
-                logger.error(f"ERROR HERE: CODE {dwErrorCode}, REGISTER: {dwErrorReg.value}, VALUE: {lErrorValue} \n")
-                logger.error(f"ERROR MESSAGE: {errText.value}")
+                logger.error(f"Error ocurred while setting card sampling rate")
+                return 1
             logger.info("Sample Rate has been set.\n")
             return 0
         else:
@@ -357,6 +358,25 @@ class M4i6631:
         if dwError:
             logger.error(f"Error configuring sequence step {step_index}: {dwError}")
 
+
+    def phase_offset_calibration(self, freq):
+        """
+        Phase one needs to add to ch0 waveform such that it's in phase with ch1 waveform. Calibrated for
+        f_sampling = 500 MHz, f_clock = 100 MHz, frequency resolution = 100 Hz. There is a slight frequency dependence,
+        around 2.5 degrees 50-70 MHz change, one may want to calibrate it more. I did not observe any dependence on
+        sampling frequency or frequency resolution.
+        :param freq: tone frequency in Hz
+        :return: Offset in radians to add to ch0 waveform.
+        """
+
+        self.ch0_phase_offset_const = -12.3 / 180 * numpy.pi
+        self.ch0_phase_offset_slope = -(2*2.5/140 * 90)/10/180*numpy.pi
+        logger.info(f"Using phase correction: {(self.ch0_phase_offset_const + self.ch0_phase_offset_slope * (freq*1e-06 - 50))/numpy.pi*180} degrees")
+        return self.ch0_phase_offset_const + self.ch0_phase_offset_slope * (freq*1e-06 - 48)
+        return 0
+
+
+
     def generate_data(self, output_wf_params : dict):
         """
         Generate waveform to output from the AWG and transfer to the board memory.
@@ -373,36 +393,46 @@ class M4i6631:
         wf_adc_norm = self.max_adc_value - 1
 
         self.output_waveform_params = output_wf_params
+        num_tones = len(output_wf_params[0].keys()) # There should never be a case where the number of tones in channels is different
+
         sample_ind_vector = numpy.arange(0, self.sequence_data_len_samples, 1)
-        waveform_ch0 = numpy.zeros(self.sequence_data_len_samples, dtype=numpy.int16)
-        waveform_ch1 = numpy.zeros(self.sequence_data_len_samples, dtype=numpy.int16)
+        waveform_ch0 = numpy.zeros(len(sample_ind_vector))
+        waveform_ch1 = numpy.zeros(len(sample_ind_vector))
 
         # Amplitude conversion: AWG outputs +-2.0 V into 50 Ohm. The internal ADC (I suppose 16-bit) has a maximum value
         # of self.max_adc_value, but only outputs positive integers. This means that max_adc_value corresponds to +4 V output.
-        # Therefore, the desired output should be scaled by 4
-        for tone_ind, tone_params in self.output_waveform_params[0].items():
-            logger.info(f"CH0: Setting tone {tone_ind} with tone parameters: {tone_params}")
-            waveform_ch0 = waveform_ch0 +  (wf_adc_norm * (tone_params["Amplitude, V"]/4.0) \
-                            * numpy.sin(2 * numpy.pi * sample_ind_vector \
-                                        * tone_params["Frequency, Hz"]//self.f_res_set \
-                                        + tone_params["Phase, rad"])).astype(numpy.int16)
-            logger.info(
-                f"Tone {tone_ind}: \nRequested frequency: {tone_params["Frequency, Hz"]} Hz, \nSet frequency: {tone_params["Frequency, Hz"] // self.f_res_set * self.f_res_set} Hz")
+        # Therefore, the desired output should be scaled by 4. I actually scale it by 2, to set amplitude and not peak-to-peak.
+        for tone_ind in numpy.arange(num_tones):
+            tone_params_ch0 = self.output_waveform_params[0][tone_ind]
+            tone_params_ch1 = self.output_waveform_params[1][tone_ind]
 
-        for tone_ind, tone_params in self.output_waveform_params[1].items():
-            logger.info(f"CH1: Setting tone {tone_ind} with tone parameters: {tone_params}")
-            waveform_ch1 = waveform_ch1 + (wf_adc_norm * (tone_params["Amplitude, V"]/4.0) \
+            logger.info(f"CH0: Setting tone {tone_ind} with tone parameters: {tone_params_ch0}")
+            tone_freq_set = tone_params_ch0["Frequency, Hz"]//self.f_res_set * self.f_res_set
+            logger.info(f"CH0: Tone {tone_ind} frequency set to {tone_freq_set}")
+            logger.warning(f"CH0: TONE {tone_ind} integer frequency {tone_params_ch0["Frequency, Hz"]//self.f_res_set}")
+            waveform_ch0 = (waveform_ch0 +  (wf_adc_norm * (tone_params_ch0["Amplitude, V"]/2.0) \
                             * numpy.sin(2 * numpy.pi * sample_ind_vector \
-                                        * tone_params["Frequency, Hz"]//self.f_res_set \
-                                        + tone_params["Phase, rad"])).astype(numpy.int16)
+                                        * tone_params_ch0["Frequency, Hz"]//self.f_res_set/(len(sample_ind_vector)) \
+                                        + tone_params_ch0["Phase, rad"]\
+                                        + self.phase_offset_calibration(tone_params_ch0["Frequency, Hz"])))).astype(numpy.int16)
             logger.info(
-                f"Tone {tone_ind}: \nRequested frequency: {tone_params["Frequency, Hz"]} Hz, \nSet frequency: {tone_params["Frequency, Hz"] // self.f_res_set * self.f_res_set} Hz")
+                f"Tone {tone_ind}: \nRequested frequency: {tone_params_ch0["Frequency, Hz"]} Hz, \nSet frequency: {tone_params_ch0["Frequency, Hz"] // self.f_res_set * self.f_res_set} Hz")
+
+            logger.info(f"CH1: Setting tone {tone_ind} with tone parameters: {tone_params_ch1}")
+            logger.warning(f"CH1: TONE {tone_ind} integer frequency {tone_params_ch1["Frequency, Hz"] // self.f_res_set} \n")
+            waveform_ch1 = (waveform_ch1 + (wf_adc_norm * (tone_params_ch1["Amplitude, V"]/2.0) \
+                            * numpy.sin(2 * numpy.pi * sample_ind_vector \
+                                        * tone_params_ch1["Frequency, Hz"]//self.f_res_set/(len(sample_ind_vector)) \
+                                        + tone_params_ch1["Phase, rad"]))).astype(numpy.int16)
+            logger.info(
+                f"Tone {tone_ind}: \nRequested frequency: {tone_params_ch1["Frequency, Hz"]} Hz, \nSet frequency: {tone_params_ch1["Frequency, Hz"] // self.f_res_set * self.f_res_set} Hz")
 
         # Interleave waveforms because that's how the AWG card transfers data
         waveform_interleaved = numpy.empty(2*waveform_ch0.size, dtype=numpy.int16)
-        waveform_interleaved[0::self.channel_number] = waveform_ch0
-        waveform_interleaved[1::self.channel_number] = waveform_ch1
-        self.pnData = (waveform_interleaved).astype(int16)
+        waveform_interleaved[0::self.channel_number] = waveform_ch0.astype(numpy.int16)
+        waveform_interleaved[1::self.channel_number] = waveform_ch1.astype(numpy.int16)
+        for i, val in enumerate(waveform_interleaved):
+            self.pnData[i] = val
         logger.info("Data transferred to the PC memory buffer")
 
         return None
@@ -445,7 +475,6 @@ class M4i6631:
         else:
             return 1
 
-
     def populate_awg_buffer(self):
 
         if self.pnData is None:
@@ -484,7 +513,8 @@ class M4i6631:
                                          segment_index=0,
                                          num_loops=1,
                                          segment_flags=0)
-            self.current_segment = 1
+            self.current_segment = 0
+            logger.info(f"AWG Switching to segment {self.current_segment}")
             logger.info(f"AWG memory updated, sequence replaying segment {self.current_segment}")
 
             spcm_dwSetParam_i32(self.hCard, SPCM_XX_ASYNCIO, 1)  # Emit a 1ms pulse from X0
@@ -495,6 +525,27 @@ class M4i6631:
         else:
             logger.error("Unexpected segment index")
             return 1
+
+    def set_output_wf_params(self, output_wf_params):
+        """
+        Function to update parameters of the output waveform.
+        :param output_wf_params: Dictionary of output waveform parameters. For format, see docstring of generate_data
+        :return:
+        """
+        # There's a bug where if I set waveform frequency below the current resolution, somehow it fucks up
+        # the output. I really can't track why this is happening, so instead I will just round the frequencies
+        # to the current set resolution
+        for key, val in output_wf_params[0].items():
+            output_wf_params[0][key]['Frequency, Hz'] = output_wf_params[0][key]['Frequency, Hz']//self.f_res_set * self.f_res_set
+        for key, val in output_wf_params[1].items():
+            output_wf_params[1][key]['Frequency, Hz'] = output_wf_params[1][key]['Frequency, Hz']//self.f_res_set * self.f_res_set
+        self.generate_data(output_wf_params)
+        err = self.populate_awg_buffer()
+        if err:
+            logger.error("Failed to change output waveform parameters")
+            return 1
+        return 0
+
 
     def card_turn_on(self):
         # We'll start and wait until all sequences are replayed.
@@ -516,4 +567,6 @@ class M4i6631:
     def get_data_buffer(self):
         return self.pnData
 
+    def get_wf_params(self):
+        return self.output_waveform_params
 
