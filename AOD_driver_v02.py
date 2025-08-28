@@ -42,7 +42,7 @@ class AOD_gui(Frame):
         # In case the tone does not exist - default parameters
         self.default_tone_params = {
                         "Frequency, Hz": 50e06, # Tone parameters
-                        "Amplitude, V": 0.1,
+                        "Amplitude, V": 0.05,
                         # "Phase, rad": 101.5/180 * numpy.pi # Out of phase
                         "Phase, rad": 0
                             }
@@ -200,13 +200,68 @@ class AOD_gui(Frame):
         self.populate_trap_ctrl_dict()
         # Place trap control widgets for each trap
         for trap_idx in numpy.arange(self.num_of_traps):
-            Label(self.trap_params_frame, text=f'Trap {trap_idx}').grid(row=0, column=1 + trap_idx)
-            self.trap_control_elements_dict[trap_idx]["Frequency Ch0, MHz"].grid(row=1, column=1 + trap_idx)
-            self.trap_control_elements_dict[trap_idx]["Frequency Ch1, MHz"].grid(row=2, column=1 + trap_idx)
-            self.trap_control_elements_dict[trap_idx]["Amplitude, mV"].grid(row=3, column=1 + trap_idx)
-            self.trap_control_elements_dict[trap_idx]["Phase, deg"].grid(row=4, column=1 + trap_idx)
+            Label(self.trap_params_frame, text=f'Trap {trap_idx}').grid(row=0, column=1 + 4*trap_idx)
+
+            # Ch0 frequency controls
+            self.trap_control_elements_dict[trap_idx]["Frequency Ch0, MHz"].grid(row=1, column=1 + 4*trap_idx)
+            Button(self.trap_params_frame, text='+', command=lambda trap_idx=trap_idx: self.freq_shift_single_step(0, trap_idx, +1)).grid(
+                row=1, column=1 + 4 * trap_idx + 1)
+            Button(self.trap_params_frame, text='-', command=lambda trap_idx=trap_idx: self.freq_shift_single_step(0, trap_idx, -1)).grid(
+                row=1, column=1 + 4 * trap_idx + 2)
+
+            # Ch1 frequency controls
+            self.trap_control_elements_dict[trap_idx]["Frequency Ch1, MHz"].grid(row=2, column=1 + 4*trap_idx)
+            Button(self.trap_params_frame, text='+', command=lambda trap_idx=trap_idx: self.freq_shift_single_step(1, trap_idx, +1)).grid(
+                row=2, column=1 + 4 * trap_idx + 1)
+            Button(self.trap_params_frame, text='-', command=lambda trap_idx=trap_idx: self.freq_shift_single_step(1, trap_idx, -1)).grid(
+                row=2, column=1 + 4 * trap_idx + 2)
+            self.trap_control_elements_dict[trap_idx]["Amplitude, mV"].grid(row=3, column=1 + 4*trap_idx)
+            self.trap_control_elements_dict[trap_idx]["Phase, deg"].grid(row=4, column=1 + 4*trap_idx)
+            # Empty space to separate columns
+            Label(self.trap_params_frame, text='').grid(row=1, column=1 + 4 * trap_idx + 3)
+
+            Button(self.trap_params_frame, text='Drop', command=lambda trap_idx=trap_idx: self.blink_trap(trap_idx)).grid(row=5, column=1 + 4 * trap_idx)
+
+        Label(self.trap_params_frame, text='Single step frequency shift, kHz').grid(row=7, column=0, columnspan=2)
+        self.single_step_control_entry = Entry(self.trap_params_frame, width=15)
+        self.single_step_control_entry.insert(0, '10')
+        self.single_step_control_entry.grid(row=8, column=0, columnspan=2)
 
         self.trap_params_frame.grid(row=1, column=0)
+
+    def freq_shift_single_step(self, ch_num, tone_ind, shift_dir):
+        """
+        Change frequency of the tone by one step, defined elsewhere.
+        :param ch_num: Number of channel
+        :param tone_ind: Index of the tone for which the switch is done
+        :param shift_dir: +1 if increased, -1 if decrease
+        :return: None
+        """
+        freq_step = float(self.single_step_control_entry.get())
+        if ch_num == 0:
+            self.trap_control_elements_dict[tone_ind]['Frequency Ch0, MHz'].delete(0, END)
+            new_freq = self.current_wf_params[0][tone_ind]['Frequency, Hz'] + shift_dir * freq_step * 1e03
+            self.trap_control_elements_dict[tone_ind]['Frequency Ch0, MHz'].insert(0, f'{new_freq / 1e06}')
+        if ch_num == 1:
+            self.trap_control_elements_dict[tone_ind]['Frequency Ch1, MHz'].delete(0, END)
+            new_freq = self.current_wf_params[1][tone_ind]['Frequency, Hz'] + shift_dir * freq_step * 1e03
+            self.trap_control_elements_dict[tone_ind]['Frequency Ch1, MHz'].insert(0, f'{new_freq / 1e06}')
+        self.push_updates_to_board()
+
+    def blink_trap(self, trap_idx):
+        """
+        Quickly turn the trap off and back on to drop the particle
+        :param trap_idx: trap index
+        :return:
+        """
+        trap_amp = float(self.trap_control_elements_dict[trap_idx]['Amplitude, mV'].get())
+        self.trap_control_elements_dict[trap_idx]['Amplitude, mV'].delete(0, END)
+        self.trap_control_elements_dict[trap_idx]['Amplitude, mV'].insert(0, '0')
+        self.push_updates_to_board()
+        time.sleep(0.1)
+        self.trap_control_elements_dict[trap_idx]['Amplitude, mV'].delete(0, END)
+        self.trap_control_elements_dict[trap_idx]['Amplitude, mV'].insert(0, f'{trap_amp}')
+        self.push_updates_to_board()
 
     def create_controls_interface(self):
         """
@@ -661,13 +716,13 @@ if __name__ == "__main__":
         0: {  # Channel 0 index
             0: {  # Tone 0 index
                 "Frequency, Hz": 45e06,  # Tone parameters
-                "Amplitude, V": 0.1,
+                "Amplitude, V": 0.05,
                 # "Phase, rad": 101.5/180 * numpy.pi # Out of phase
                 "Phase, rad": 0
             },
             1: {  # Tone 1 index
                 "Frequency, Hz": 55e06,  # Tone parameters
-                "Amplitude, V": 0.1,
+                "Amplitude, V": 0.05,
                 # "Phase, rad": 101.5/180 * numpy.pi # Out of phase
                 "Phase, rad": 0
             }
@@ -675,12 +730,12 @@ if __name__ == "__main__":
         1: {  # Channel 1 index
             0: {  # Tone 0 index
                 "Frequency, Hz": 55e06,  # Tone parameters
-                "Amplitude, V": 0.1,
+                "Amplitude, V": 0.05,
                 "Phase, rad": 0
             },
             1: {  # Tone 1 index
                 "Frequency, Hz": 45e06,  # Tone parameters
-                "Amplitude, V": 0.1,
+                "Amplitude, V": 0.05,
                 "Phase, rad": 0
             }
         }
